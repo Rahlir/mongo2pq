@@ -2,7 +2,6 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Tuple
-from re import compile
 
 from bson import Int64, ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
@@ -12,7 +11,7 @@ from tqdm import tqdm
 from yaml.constructor import ConstructorError
 
 from mongo2pq.types import PythonPrimitive
-from mongo2pq.exceptions import ConfigParseError, SchemaParseError
+from mongo2pq.exceptions import SchemaParseError
 
 
 class Schema:
@@ -223,70 +222,6 @@ async def update_schema_with_batch(
 ):
     new_schema = infer_schema_from_batch(current_schema.name(), batch)
     current_schema.merge(new_schema)
-
-
-def parse_schema_config(config: Any) -> Mapping[str, Iterable]:
-    if not isinstance(config, dict):
-        raise ConfigParseError(
-            f"The schema config node must be parsable to dict, not {type(config)}"
-        )
-
-    parsed_config = {}
-    for collection, fieldlist in config.items():
-        if not isinstance(fieldlist, list):
-            raise ConfigParseError(
-                f"The collection node in schema config must be parsable to list, not {type(fieldlist)}"
-            )
-        parsed_config[collection] = []
-        for i, fieldconfig in enumerate(fieldlist):
-            if not isinstance(fieldconfig, dict):
-                print(
-                    f"WARNING: node {i} in schema config for {collection} must be parsable to dict, "
-                    f"not {type(fieldconfig)}"
-                )
-                print("Node ignored...")
-            else:
-                try:
-                    field_type_raw = fieldconfig['fieldtype']
-                    field_type = pa.type_for_alias(field_type_raw)
-                    field_name = fieldconfig['fieldname']
-                    definition_type = fieldconfig['type']
-                    field_test = None
-                    if definition_type == 'contains':
-                        def create_contains(operand: str):
-                            return lambda x: operand in x
-                        field_test = create_contains(field_name)
-                    elif definition_type == 'regex':
-                        operator = compile(field_name)
-                        field_test = lambda x: operator.search(x) is not None
-                    elif definition_type == 'equals':
-                        def create_equals(operand: str):
-                            return lambda x: x == operand
-                        field_test = create_equals(field_name)
-                    else:
-                        print(
-                            f"WARNING: node {i} in schema config for {collection} "
-                            f"has unknown type {definition_type}"
-                        )
-                        print("Node ignored...")
-                except KeyError:
-                    print(
-                        f"WARNING: node {i} in schema config for {collection} "
-                        "does not contain all required keys (type, fieldname, or fieldtype)"
-                    )
-                    print("Node ignored...")
-                except ValueError:
-                    print(
-                        f"WARNING: node {i} in schema config for {collection} "
-                        f"has fieldtype {fieldconfig['fieldtype']} which doesn't exist"
-                    )
-                    print("Node ignored...")
-                else:
-                    parsed_config[collection].append({
-                        'field_type': field_type,
-                        'field_test': field_test
-                    })
-    return parsed_config
 
 
 def unify_types(type1: pa.DataType, type2: pa.DataType) -> pa.DataType:

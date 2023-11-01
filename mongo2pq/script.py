@@ -1,35 +1,19 @@
-import asyncio
 from argparse import ArgumentParser, Namespace
+import asyncio
 from os import environ
-from sys import exit
-from typing import Any, Mapping, List
-from pathlib import Path
 from os import get_terminal_size
+from pathlib import Path
+from sys import exit
+from typing import List
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
 from pymongo.errors import ServerSelectionTimeoutError
-from tqdm import tqdm
-from bson import BSON
-from pyarrow.parquet import ParquetWriter
 
 from mongo2pq import PROJECT_NAME
-from mongo2pq.exceptions import ConfigParseError, SchemaParseError
-from mongo2pq.schema import create_schema, load_schema_from_file, Schema, parse_schema_config
-
-
-async def generate_partitions(collection: AsyncIOMotorCollection,
-                              partition_key: str) -> List[Any]:
-    cur = collection.aggregate([{'$group': {'_id': f"${partition_key}"}}])
-    partitions = []
-    async for doc in cur:
-        partitions.append(doc['_id'])
-    return partitions
-
-
-async def connect_mongo(uri: str, check_connection: bool = True) -> AsyncIOMotorClient:
-    if check_connection:
-        await AsyncIOMotorClient(uri, serverSelectionTimeoutMS=1000).server_info()
-    return AsyncIOMotorClient(uri)
+from mongo2pq.config import parse_config
+from mongo2pq.exceptions import SchemaParseError
+from mongo2pq.extract_load import extract_load_collection
+from mongo2pq.mongo import connect_mongo
+from mongo2pq.schema import create_schema, load_schema_from_file
 
 
 def parse_args() -> Namespace | None:
@@ -99,34 +83,6 @@ def parse_args() -> Namespace | None:
             parsed.config = None
 
     return parsed
-
-
-def parse_config(config: Path) -> Mapping[str, Any]:
-    import yaml
-    parsers = {'schema': parse_schema_config}
-
-    parsed_config = {}
-    with config.open(mode='r') as c_file:
-        parsed_raw = yaml.load(c_file, Loader=yaml.CLoader)
-        if not isinstance(parsed_raw, dict):
-            print("WARNING: the config couldn't be parsed because:")
-            print(f"Outermost node of config must be parsable to dict, not {type(parsed_raw)}")
-            print("Config ignored...")
-            return parsed_config
-    
-    for field, parser in parsers.items():
-        if valid_item := parsed_raw.pop(field, None):
-            try:
-                parsed_config[field] = parser(valid_item)
-            except ConfigParseError as err:
-                print(f"WARNING: the config field {field} parsing failed with message:")
-                print(str(err))
-                print("Config field ignored...")
-    
-    if parsed_raw:
-        print(f"WARNING: config keys '{', '.join(parsed_raw.keys())}' unknown")
-
-    return parsed_config
 
 
 async def main(
@@ -199,81 +155,6 @@ async def main(
                                       progress_bar=cli)
 
     return 0
-
-
-async def extract_load_collection(
-        collection: AsyncIOMotorCollection,
-        schema: Schema,
-        outdir: Path = Path('.'),
-        partition_key: str | None = None,
-        batch_size: int | None = None,
-        progress_bar: bool = True
-):
-    n_docs = await collection.estimated_document_count()
-    pbar = None
-    if progress_bar:
-        pbar = tqdm(total=n_docs)
-    if not batch_size:
-        batch_size_bytes = 12_000_000  # 12MB for batch seem to work well
-        n_samples = 1000
-        cursor = collection.aggregate([{'$sample': {'size': n_samples}}])
-        samples = await cursor.to_list(n_samples)
-        sizes = map(lambda x: len(BSON.encode(x)), samples)
-        avg_size = sum(sizes) / len(samples)
-        batch_size = int(batch_size_bytes / avg_size)
-
-
-    async with asyncio.TaskGroup() as tgroup:
-        if not partition_key:
-            outfile = outdir / f'{collection.name}.parquet'
-            tgroup.create_task(extract_load_part(
-                tgroup,
-                collection=collection, schema=schema, path=outfile,
-                filter={}, batch_size=batch_size, pbar_instance=pbar
-            ))
-        else:
-            partitions = await generate_partitions(collection, partition_key)
-            for partition in partitions:
-                outfile = outdir / f'{collection.name}.parquet' / f'{partition_key}={partition}' / 'data.parquet'
-                outfile.parent.mkdir(parents=True)
-                filter = {partition_key: partition}
-                tgroup.create_task(extract_load_part(
-                    tgroup, collection=collection, schema=schema,
-                    path=outfile, filter=filter,
-                    batch_size=batch_size, pbar_instance=pbar
-                ))
-
-
-async def extract_load_part(
-        taskgroup: asyncio.TaskGroup,
-        *, collection: AsyncIOMotorCollection,
-        schema: Schema,
-        path: Path,
-        filter: Mapping,
-        batch_size: int,
-        pbar_instance: tqdm | None = None
-):
-    pwriter = ParquetWriter(path, schema.schema())
-    cursor = collection.find(filter, batch_size=batch_size)
-    while cursor.alive:
-        batch = await cursor.to_list(batch_size)
-        taskgroup.create_task(
-            write_batch_to_parquet(batch, schema, pwriter, not cursor.alive, pbar_instance)  # type: ignore
-        )
-
-
-async def write_batch_to_parquet(
-        batch: List[Mapping[str, Any]],
-        schema: Schema,
-        writer: ParquetWriter,
-        last_batch: bool,
-        pbar_instance: tqdm | None = None):
-    record_batch = schema.create_record_batch(batch)
-    writer.write_batch(record_batch)
-    if pbar_instance:
-        pbar_instance.update(len(batch))
-    if last_batch:
-        writer.close()
 
 
 if __name__ == "__main__":
