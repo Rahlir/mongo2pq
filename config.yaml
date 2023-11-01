@@ -1,0 +1,8 @@
+schema:
+  telemetry:
+    - type: regex
+      fieldname: (?<!orientation)@tcn_nadi_veh
+      fieldtype: string
+    - type: contains
+      fieldname: tcn_etele_veh
+      fieldtype: string

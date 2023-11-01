@@ -1,0 +1,15 @@
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+
+# Local duckdb databases
+*.duckdb
+
+# Schema files
+telemetry.yaml
+faults.yaml
