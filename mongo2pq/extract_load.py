@@ -18,6 +18,9 @@ async def extract_load_collection(
         batch_size: int | None = None,
         progress_bar: bool = True
 ):
+    if not outdir.is_dir():
+        outdir.mkdir(parents=True)
+
     n_docs = await collection.estimated_document_count()
     pbar = None
     if progress_bar:

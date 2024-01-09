@@ -15,9 +15,12 @@ from mongo2pq.exceptions import SchemaParseError
 
 
 class Schema:
-    def __init__(self, name: str,
-                 fields: Iterable[tuple | pa.Field] | Mapping[str, pa.DataType] | None = None,
-                 pa_schema: pa.Schema | None = None):
+    def __init__(
+        self,
+        name: str,
+        fields: Iterable[tuple | pa.Field] | Mapping[str, pa.DataType] | None = None,
+        pa_schema: pa.Schema | None = None
+    ):
         self._name = name
         if pa_schema:
             self._schema = pa_schema
@@ -26,6 +29,7 @@ class Schema:
         else:
             self._schema = pa.schema([])
         self._cast_table_property: dict[str, Tuple[type, Callable]] = {}
+        self._rename_map: dict[str, str] = {}
 
     def merge(self, other: 'Schema'):
         if self._name != other._name:
@@ -46,11 +50,18 @@ class Schema:
 
         self._schema = new_schema
         self._cast_table_property = {}
+        self._rename_map.update(other._rename_map)
 
     def use_config(self, config: Mapping[str, list]):
-            config_list = config.get(self._name, [])
-            for index, field_name in enumerate(self._schema.names):
-                for config_node in config_list:
+        self._cast_table_property = {}
+        self._rename_map = {}
+
+        config_list = config.get(self._name, [])
+        for index, field_name in enumerate(self._schema.names):
+            retyped = False
+            renamed = False
+            for config_node in config_list:
+                if not retyped and config_node['type'] == 'retype':
                     field_test = config_node['field_test']
                     field_type = config_node['field_type']
                     if (field_test(field_name) and
@@ -58,7 +69,20 @@ class Schema:
                         self._schema = self._schema.set(
                             index, self._schema.field(index).with_type(field_type)
                         )
-                        break
+                        retyped = True
+                elif not renamed and config_node['type'] == 'rename':
+                    rename_func = config_node['rename_function']
+                    if (new_name := rename_func(field_name)) != field_name:
+                        increment = 1
+                        while self._schema.get_field_index(new_name) != -1:
+                            new_name = f'{rename_func(field_name)}_{increment}'
+                            increment += 1
+                        self._schema = self._schema.set(
+                            index, self._schema.field(index).with_name(new_name)
+                        )
+                        self._rename_map[field_name] = new_name
+                        renamed = True
+
 
     def dump_to_file(self, filename: str | None = None, destination: Path = Path('.')):
         import yaml
@@ -75,6 +99,8 @@ class Schema:
 
         yaml.add_representer(Schema, schema_representer, Dumper=yaml.CDumper)  # type: ignore
 
+        if not destination.is_dir():
+            destination.mkdir()
         if not filename:
             filename = self._name + '.yaml'
         new_file_path = destination / filename
@@ -84,10 +110,10 @@ class Schema:
     def create_record_batch(self, batch: List[Mapping[str, Any]]) -> pa.RecordBatch:
         def cast_row(row: Mapping[str, Any]) -> Mapping[str, Any]:
             return {
-                key: self._cast_field(key, field)
+                self._rename_map.get(key, key): self._cast_field(self._rename_map.get(key, key), field)
                 for key, field in row.items()
                 # 'if field' to ignore empty strings and Nones
-                if field and key in self._cast_table()
+                if field and self._rename_map.get(key, key) in self._cast_table()
             }
 
         return pa.RecordBatch.from_pylist(
@@ -144,7 +170,7 @@ class Schema:
         return self._schema
 
 
-def load_schema_from_file(schema_file: Path, config: Mapping[str, list] | None) -> Schema:
+def load_schema_from_file(schema_file: Path) -> Schema:
     import yaml
 
     def schema_constructor(loader: yaml.Loader, node: yaml.MappingNode) -> Schema:
@@ -172,10 +198,8 @@ def load_schema_from_file(schema_file: Path, config: Mapping[str, list] | None) 
         raise SchemaParseError(f"Schema file {schema_file!s} couldn't be opened")
     except ConstructorError as err:
         raise SchemaParseError(f"Schema file {schema_file!s} couldn't be parsed: {err!s}")
-    else:
-        if config:
-            schema_obj.use_config(config)
-        return schema_obj
+
+    return schema_obj
 
 
 def infer_schema_from_batch(name: str,  batch: Iterable[Mapping[str, Any]]) -> Schema:
@@ -192,10 +216,10 @@ def infer_schema_from_batch(name: str,  batch: Iterable[Mapping[str, Any]]) -> S
     return Schema(name, fields=known_fields)
 
 
-async def create_schema(collection: AsyncIOMotorCollection,
-                        samples: int = 20000, config: Mapping[str, list] | None = None,
-                        progress_bar: bool = True) -> Schema:
-    batch_size = 1000
+async def infer_schema(collection: AsyncIOMotorCollection,
+                       samples: int = 20000,
+                       progress_bar: bool = True) -> Schema:
+    batch_size = 2000
     # Need this style in order to accommodate pyright. Otherwise we get
     # 'possibly unbound error'
     pbar = None  
@@ -212,8 +236,6 @@ async def create_schema(collection: AsyncIOMotorCollection,
             if pbar:
                 pbar.update(batch_size)
 
-    if config:
-        schema.use_config(config)
     return schema
 
 
@@ -268,9 +290,11 @@ def unify_types(type1: pa.DataType, type2: pa.DataType) -> pa.DataType:
     if pa_types.is_floating(type1) and pa_types.is_integer(type2):
         return type1
 
-    if (pa_types.is_integer(type1) or pa_types.is_floating(type1)) and pa_types.is_temporal(type2):
+    if (pa_types.is_integer(type1) or
+        pa_types.is_floating(type1)) and pa_types.is_temporal(type2):
         return type1
-    if pa_types.is_temporal(type1) and (pa_types.is_integer(type2) or pa_types.is_floating(type2)):
+    if pa_types.is_temporal(type1) and (pa_types.is_integer(type2) or
+                                        pa_types.is_floating(type2)):
         return type2
 
     if pa_types.is_binary(type1) or pa_types.is_binary(type2):
@@ -326,7 +350,8 @@ def infer_type(value: Any, name: str) -> pa.DataType:
         return pa.bool_()
 
     if isinstance(value, datetime):
-        if not value.hour and not value.minute and not value.second and not value.microsecond:
+        if (not value.hour and not value.minute and not value.second and not
+            value.microsecond):
             return pa.date32()
         return pa.date64()
 

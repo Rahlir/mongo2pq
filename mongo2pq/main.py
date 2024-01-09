@@ -11,7 +11,7 @@ from mongo2pq.config import parse_config
 from mongo2pq.exceptions import SchemaParseError
 from mongo2pq.extract_load import extract_load_collection
 from mongo2pq.mongo import connect_mongo
-from mongo2pq.schema import create_schema, load_schema_from_file
+from mongo2pq.schema import infer_schema, load_schema_from_file
 
 
 def main(
@@ -20,7 +20,7 @@ def main(
     outdir: Path = Path('.'),
     schema_paths: List[Path] | None = None, samples: int = 20000,
     partition_key: str | None = None, config_file: Path | None = None,
-    cli: bool = True
+    debug_config: bool = False, cli: bool = True
 ) -> int:
     with Runner() as runner:
         try:
@@ -59,19 +59,25 @@ def main(
             if schema_path := schema_paths_dict.get(collection):
                 print(f"loading schema from {schema_path!s}... ", end='')
                 try:
-                    schema = load_schema_from_file(schema_path, config=config.get('schema'))
+                    schema = load_schema_from_file(schema_path)
                     print("success")
                 except SchemaParseError as err:
                     print("failed with message:")
                     print(str(err))
                     print("Inferring from sample instead...")
-                    schema = runner.run(create_schema(client[db][collection], samples,
-                                                      config=config.get('schema'), progress_bar=cli))
+                    schema = runner.run(infer_schema(client[db][collection], samples,
+                                                     progress_bar=cli))
                     schema.dump_to_file(destination=outdir)
             else:
-                schema = runner.run(create_schema(client[db][collection], samples,
-                                                  config=config.get('schema'), progress_bar=cli))
+                schema = runner.run(infer_schema(client[db][collection], samples,
+                                                 progress_bar=cli))
                 schema.dump_to_file(destination=outdir)
+
+            if schema_config := config.get('schema'):
+                schema.use_config(schema_config)
+                if debug_config:
+                    schema.dump_to_file(filename=f"{collection}_config_applied.yaml",
+                                        destination=outdir)
 
             schemas[collection] = schema
 
@@ -137,6 +143,11 @@ def parse_args() -> Namespace | None:
         type=Path, default=environ.get('MONGO2PQ_CONFIG'),
         help="YAML config with schema overrides"
     )
+    parser.add_argument(
+        '-D', '--debug_config',
+        help="Debug the schema config by writing the new schema to a file",
+        action='store_true'
+    )
 
     parsed = parser.parse_args()
     if not parsed.uri:
@@ -167,4 +178,5 @@ def run() -> int:
         return 1
     return main(args.uri, db=args.db, collections=args.collections,
                 outdir=args.outdir, schema_paths=args.schemas, samples=args.samples,
-                partition_key=args.partition, config_file=args.config)
+                partition_key=args.partition, config_file=args.config,
+                debug_config=args.debug_config)
