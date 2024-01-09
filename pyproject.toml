@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "mongo2pq"
 version = "0.1.0"
-description = ""
+description = "Script to extract collections from MongoDB and load it to Parquet"
 authors = ["Tadeas Uhlir <tadeas.uhlir@gmail.com>"]
 readme = "README.md"
 

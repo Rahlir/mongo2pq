@@ -1,0 +1,50 @@
+# So far the only supported config key is 'schema'
+schema:
+  # telemetry_data is the collection name
+  telemetry_data:
+    - type: retype_equals
+      # Let's say we have a timestamp field in the collection. Now, imagin
+      # the original database designer had a rough day when setting up the
+      # DB and stored it as string instead of as timestamp (we are talking
+      # about MongoDB, it's more likely than not that there wasn't any DB
+      # designer to begin with).
+      fieldname: telemetry_snapshot_time
+      # The fieldtype accepts the strings recognized by the (poorly
+      # documented) pyarrow function type_for_alias. To see the available
+      # aliases, check the _type_aliases dictionary in the file
+      # https://github.com/apache/arrow/blob/main/python/pyarrow/types.pxi
+      fieldtype: timestamp[ms]
+    - type: retype_regex
+      # Imagine we have an id field. It might look like integer. But,
+      # we would rather it be stored as string since integers like
+      # '245345098321' can eventually overflow. However, to make sure
+      # we don't accidentally retype a real integer ID, we use python
+      # regex.
+      fieldname: (?<!numeric_)id
+      fieldtype: string
+    - type: retype_contains
+      # Now imagine we have plane telemetry data in the collection,
+      # there are fields such as 'flap_orientation' that store the
+      # current angle configuration of flaps. They might all appear as
+      # integers now, but what if we we expect that some planes might
+      # eventually have flaps set to angles that are not whole numbers.
+      fieldname: orientation
+      fieldtype: float
+    - type: rename_regex
+      # Consider that the database stores some telemetry data in the
+      # form of 'datapoint_source'. But, for nice alphabetic sort of
+      # columns during our analysis, we might actually want
+      # the keys as 'source_datapoint'.
+      oldname: (\S+)_(\S+)
+      newname: \2_\1
+    - type: rename_regex_upper
+      # Again consider the above example. But now, we actually want
+      # to add some visual flair and make the source more
+      # distinguishable from the datapoint name. So, we want to
+      # transform the field key to the form 'SOURCE_datapoint'
+      oldname: (\S+)_(\S+)
+      newname: \2_\1
+      # We want the match group 2 to be transformed to upper case.
+      # In this case forget about 0 based array indexing of your favorite
+      # programming language.
+      upper: [2]
